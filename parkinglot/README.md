@@ -375,7 +375,7 @@ class ParkingLot{
     }
 }
 ```
-
+### Phase 4
 Similarlly if we want to control pricing - based on weekend pricing , vehicle type or membershipt we would need a PricingStrategy
 ```java
 public interface PricingStrategy {

@@ -485,5 +485,172 @@ public Receipt unparkVehicle(
 ## Patterns used 
 - Strategy for Parking and Pricing 
 - factory for creating ParkingSpot for different types of parking spot - BIKE,CAR LARGE etc
-- 
+
+## Concurrency 
+```
+Spot C1 is available
+
+Thread T1 -> Car A enters
+Thread T2 -> Car B enters
+```
+1. Naive : synchronized `parkVehicle`
+Cons : Only one vehicle can enter at a time
+2. Reentrant lock in `ParkingFloor`
+```java
+class ParkingFloor {
+
+    Private ReentrantLock lock;
+    lock.lock();
+    try {
+        allocate spot
+    }finally {
+        lock.unlock();
+    }
+}
+
+```
+Benefit : Independent floor locking 
+
+3. Lock per spot using compareAndset(expectedValue, newValue)
+`Map<SpotType, Set<ParkingSpot>>`
+```java
+spot.compareAndSet(
+      AVAILABLE,
+      OCCUPIED);
+
+
+
+public class ParkingSpot {
+    private final String spotId;
+    private final SpotType spotType;
+    private final AtomicBoolean isOccupied = new AtomicBoolean(false);
+    private Vehicle parkedVehicle; // Must be volatile if read outside lock
+
+    public boolean occupy(Vehicle vehicle) {
+        // If currently false (not occupied), atomically set to true (occupied)
+        if (isOccupied.compareAndSet(false, true)) {
+            this.parkedVehicle = vehicle;
+            return true;
+        }
+        return false; // Already occupied
+    }
+
+    public boolean vacate() {
+        if (isOccupied.compareAndSet(true, false)) {
+            this.parkedVehicle = null;
+            return true;
+        }
+        return false; // Already vacant
+    }
+}
+
+```
+Benefit: Fine-grained locking and maximum concurrency 
+
+
+## Schema Design 
+```
+PARKING_LOT
+-----------
+lot_id PK
+name
+address
+
+PARKING_FLOOR
+-------------
+floor_id PK
+lot_id FK
+floor_number
+
+PARKING_SPOT
+------------
+spot_id PK
+floor_id FK
+spot_type
+status
+vehicle_id_nullable
+
+TICKET
+-------
+ticket_id PK
+spot_id FK
+vehicle_number
+vehicle_type
+entry_time
+exit_time
+status
+
+RECEIPT
+-------
+receipt_id PK
+ticket_id FK
+amount
+generated_time
+```
+
+
+## Scaling issues 
+1. If we look for all floors to get a available spot -> O(number_of_floors) complexity
+    * Imaging 100 floors and 50k spots 
+    Introduce Map<SpotType,Integer> availabeCountByFloor -> then find floor instantly
+2. Multiple app servers would have their own inmemory state of activeTickets 
+    * We need a distributed cache like redis or shared DB storage
+3. Concurrency issue - allocate same spot - handle with spot locking
+    * Distributed locking can be achieved using DB lock or redis lock
+4. Double exit - handle with state updates in redis/db - 
+```
+UPDATE ticket
+SET exit_time=NOW()
+WHERE ticket_id=?
+AND exit_time IS NULL
+```
+Only succeeds if above is true.
+
+5. What if activeTickets are in millions
+    * Use Redis or DB with index ticket_id
+6. Display Board Updates 
+    * Pub sub on `SpotAlocatedEvent` and `SpotRleasedEvent`
+7. Many parking lots 
+    * lotId, ParkingLotRepository -> ParkingService
+8. Analytics Queries 
+    - How many car enetred today
+        - Scan all the tickets - BAD
+        ```(SELECT COUNT(*)
+            FROM ticket
+            WHERE vehicle_type='CAR'
+            AND DATE(entry_time)=CURRENT_DATE;)
+        ```
+    Consider 100 parking lots , 50 millions tickets/year, dashboard refreshes every 5 seconds 
+    running above query is expensive
+
+    Hence Introduce Analytics events
+    `VehicleEnteredEvent`
+    `VehicleExitedEvent`
+    ```java
+    parkVehicle()
+     -> create ticket 
+     -> publish VehicleEnteredEvent
+    
+    ```
+    Goes to a DB 
+    ```
+    DAILY_STATS
+    -----------
+    date
+    vehicle_type
+    entry_count
+    exit_count
+    ```
+    
+    Now query is 
+    ```
+    SELECT entry_count
+    FROM DAILY_STATS
+    WHERE date='2026-06-23'
+    AND vehicle_type='CAR';
+    ```
+
+9. Vehicle Search - Find where a vehicle with licensePlate is parked
+have a `Map<String,Ticket> vehicleIndex` -> vehiclelincense -> Ticket -> ParkingSpot 
+    
 
